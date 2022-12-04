@@ -84,6 +84,7 @@ private:
             OSArray *           blessedUsagePairs;
             UInt8               bootMouseData[4];
             bool                appleVendorSupported;
+            IOHIDElement *      keyboardPower;
         } keyboard;
         
         struct {
@@ -94,6 +95,10 @@ private:
             bool                collectionDispatch;
             IOFixed             centroidX;
             IOFixed             centroidY;
+            IOHIDElement *      relativeScanTime;
+            IOHIDElement *      surfaceSwitch;
+            IOHIDElement *      reportRate;
+            OSArray *           buttons;
         } digitizer;
         
         struct {
@@ -193,6 +198,17 @@ private:
             OSArray *           tiltElements;
         } orientation;
 
+        struct {
+            OSArray *           phaseElements;
+            IOHIDElement *      longPress;
+            IOOptionBits        phaseFlags;
+            IOOptionBits        prevPhaseFlags;
+        } phase;
+
+        struct {
+            OSArray * elements;
+        } proximity;
+
         UInt64  lastReportTime;
 
         IOWorkLoop *            workLoop;
@@ -222,7 +238,10 @@ private:
     bool                    parseTemperatureElement(IOHIDElement * element);
     bool                    parseSensorPropertyElement(IOHIDElement * element);
     bool                    parseDeviceOrientationElement(IOHIDElement * element);
+    bool                    parsePhaseElement(IOHIDElement * element);
+    bool                    parseProximityElement(IOHIDElement * element);
 
+    void                    processLEDElements();
     void                    processDigitizerElements();
     void                    processMultiAxisElements();
     void                    processGameControllerElements();
@@ -245,6 +264,7 @@ private:
     void                    setTemperatureProperties();
     void                    setSensorProperties();
     void                    setDeviceOrientationProperties();
+    void                    setSurfaceDimensions();
 
     UInt32                  checkGameControllerElement(IOHIDElement * element);
     UInt32                  checkMultiAxisElement(IOHIDElement * element);
@@ -273,11 +293,14 @@ private:
     void                    handleCompassReport(AbsoluteTime timeStamp, UInt32 reportID);
     void                    handleTemperatureReport(AbsoluteTime timeStamp, UInt32 reportID);
     void                    handleDeviceOrientationReport(AbsoluteTime timeStamp, UInt32 reportID);
+    void                    handlePhaseReport(AbsoluteTime timeStamp, UInt32 reportID);
+    void                    handleProximityReport(AbsoluteTime, UInt32 reportID);
 
     bool                    serializeCharacterGestureState(void * ref, OSSerialize * serializer);
     bool                    conformTo (UInt32 usagePage, UInt32 usage);
     IOHIDEvent*             createDigitizerTransducerEventForReport(DigitizerTransducer * transducer, AbsoluteTime timeStamp, UInt32 reportID);
     bool                    serializeDebugState(void * ref, OSSerialize * serializer);
+    UInt32                  getButtonStateFromElements(OSArray * elements);
 
 protected:
 

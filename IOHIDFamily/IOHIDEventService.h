@@ -34,7 +34,7 @@
 #include <IOKit/hid/IOHIDInterface.h>
 #include <IOKit/hid/IOHIDElement.h>
 #include <IOKit/hid/IOHIDKeys.h>
-#if TARGET_OS_IPHONE
+#if KERNEL_PRIVATE
 #include <IOKit/hid/IOHIDEvent.h>
 #endif
 #include "IOHIDUtility.h"
@@ -153,24 +153,8 @@ private:
 
         struct {
             
-#if TARGET_OS_IPHONE
-            struct {
-                UInt32                  startMask;
-                UInt32                  mask;
-                UInt32                  nmiHoldMask;
-                UInt32                  nmiDelay;
-                UInt32                  nmiTriplePressMask;
-                UInt32                  nmiPressCount;
-                UInt64                  nmiStartTime;
-                IOTimerEventSource *    nmiTimer;
-                UInt32                  stackshotHeld;
-                IOTimerEventSource *    stackshotTimer;
-            } debug;
-            bool                    swapISO;
-#else
             Key                     pressedKeys[10];
             UInt32                  pressedKeysMask;
-#endif
             bool                    appleVendorSupported;
         } keyboard;
 
@@ -190,7 +174,6 @@ private:
             UInt32                  buttonState;
         } relativePointer;
 
-#if TARGET_OS_OSX
 
         struct {
             UInt32                  buttonState;
@@ -199,15 +182,13 @@ private:
         int                   pointingShim;
 #endif
         int                   keyboardShim;
-#endif
         UInt32                debugMask;
+        bool                  powerButtonNmi;
+        bool                  disableAcceleration;
     };
-
-#if TARGET_OS_OSX
     static KeyValueMask   keyMonitorTable[];
     static DebugKeyAction debugKeyActionTable[];
-#endif
-
+    
     ExpansionData *         _reserved;
 
 #ifdef POINTING_SHIM_SUPPORT
@@ -232,13 +213,7 @@ private:
 
     IOFixed                 determineResolution ( IOHIDElement * element );
                                     
-#if TARGET_OS_IPHONE
-    void                    debuggerTimerCallback(IOTimerEventSource *sender);
-    
-    void                    triggerDebugger();
-
-    void                    stackshotTimerCallback(IOTimerEventSource *sender);
-#endif
+    bool                    isPowerButtonNmiEnabled() const;
     
     void                    multiAxisTimerCallback(IOTimerEventSource *sender);
 
@@ -371,13 +346,6 @@ protected:
                                 SInt32                      deltaAxis1,
                                 SInt32                      deltaAxis2,
                                 SInt32                      deltaAxis3,
-                                IOOptionBits                options = 0 );
-
-    void                    dispatchScrollWheelEventWithFixed(
-                                AbsoluteTime                timeStamp,
-                                IOFixed                     deltaAxis1,
-                                IOFixed                     deltaAxis2,
-                                IOFixed                     deltaAxis3,
                                 IOOptionBits                options = 0 );
 
     virtual void            dispatchTabletPointerEvent(
@@ -695,11 +663,9 @@ protected:
     
     OSMetaClassDeclareReservedUsed(IOHIDEventService, 10);
     virtual UInt32          getPrimaryUsage();
- 
-#if TARGET_OS_OSX
     static void debugActionSysdiagnose(IOHIDEventService* self, void *parameter);
     static void debugActionNMI(IOHIDEventService* self, void *parameter);
-#endif
+    static void powerButtonNMI(IOHIDEventService* self, void *parameter);
   
 public:
     OSMetaClassDeclareReservedUsed(IOHIDEventService,  11);
@@ -906,8 +872,24 @@ protected:
     OSMetaClassDeclareReservedUsed(IOHIDEventService, 21);
     virtual IOHIDEvent *copyMatchingEvent(OSDictionary *matching);
     
-    OSMetaClassDeclareReservedUnused(IOHIDEventService, 22);
-    OSMetaClassDeclareReservedUnused(IOHIDEventService, 23);
+    OSMetaClassDeclareReservedUsed(IOHIDEventService, 22);
+    virtual void     dispatchScrollWheelEventWithFixed(AbsoluteTime                timeStamp,
+                                                       IOFixed                     deltaAxis1,
+                                                       IOFixed                     deltaAxis2,
+                                                       IOFixed                     deltaAxis3,
+                                                       IOOptionBits                options = 0);
+
+    
+    OSMetaClassDeclareReservedUsed(IOHIDEventService, 23);
+    virtual void            dispatchKeyboardEvent(AbsoluteTime                timeStamp,
+                                                  UInt32                      usagePage,
+                                                  UInt32                      usage,
+                                                  UInt32                      value,
+                                                  UInt8                       pressCount,
+                                                  UInt8                       longPress,
+                                                  UInt8                       clickSpeed,
+                                                  IOOptionBits                options = 0 );
+
     OSMetaClassDeclareReservedUnused(IOHIDEventService, 24);
     OSMetaClassDeclareReservedUnused(IOHIDEventService, 25);
     OSMetaClassDeclareReservedUnused(IOHIDEventService, 26);

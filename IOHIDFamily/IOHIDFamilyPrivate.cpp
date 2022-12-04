@@ -23,9 +23,7 @@
 
 #include "IOHIDFamilyPrivate.h"
 
-#if TARGET_OS_OSX
 #include "IOHIDSystem.h"
-#endif
 #include "OSStackRetain.h"
 #include "IOHIDPrivateKeys.h"
 #include "IOHIDDebug.h"
@@ -40,6 +38,41 @@
 #define kHIDVendor2MaskScoreIncrement       950
 #define kHIDVendor2ArrayMaskScoreIncrement  925
 #define kHIDVendor3ScoreIncrement           100
+
+
+IOFixed getFixedValue(uint32_t value, uint32_t unit, uint32_t exponent)
+{
+    int64_t  orgValue   = (int64_t)value;
+    IOFixed returnValue     = 0;
+
+    uint32_t numExp   = 1;
+    uint32_t denomExp = 1;
+    int resExponent  = exponent & 0x0F;
+
+    // Value in MM
+    switch (unit) {
+       case 0x11:
+           // cm to mm
+           orgValue = orgValue * 10;
+           break;
+       default: {
+           return (IOFixed)orgValue;
+       }
+    }
+
+    if (resExponent < 8) {
+       for (int i = resExponent; i > 0; i--) {
+           numExp *=  10;
+       }
+    } else {
+       for (int i = 0x10 - resExponent; i > 0; i--) {
+           denomExp *= 10;
+       }
+    }
+
+    returnValue = (IOFixed)(((orgValue << 16) / denomExp) * numExp);
+    return returnValue;
+}
 
 //---------------------------------------------------------------------------
 // Compare the properties in the supplied table to this object's properties.
@@ -401,17 +434,12 @@ bool MatchPropertyTable(IOService * owner, OSDictionary * table, SInt32 * score)
 
 void IOHIDSystemActivityTickle(SInt32 nxEventType, IOService *sender)
 {
-#if TARGET_OS_OSX
     HIDLogInfo("HID Activity Tickle (type:%d sender:%llx)", nxEventType, sender ? sender->getRegistryEntryID() : 0);
     IOHIDSystem *ioSys = IOHIDSystem::instance();
     if (ioSys) {
         intptr_t event = nxEventType;
         ioSys->message(kIOHIDSystemActivityTickle, sender, (void*)event);
     }
-#else
-    (void)nxEventType;
-    (void)sender;
-#endif
 }
 
 extern "C" int  kern_stack_snapshot_with_reason(char *reason);

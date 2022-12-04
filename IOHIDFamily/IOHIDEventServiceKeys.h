@@ -97,4 +97,48 @@
  */
 #define kIOHIDDigitizerTipThresholdKey "DigitizerTipThreshold"
 
+/*!
+ * @define kIOHIDSurfaceDimensionsKey
+ *
+ * @abstract
+ * Dictionary property published on a service that describes the surface
+ * dimensions for services that publish absolute X/Y values, such as digitizer
+ * and pointer devices. The dictionary will contain the kIOHIDWidthKey and
+ * kIOHIDHeightKey keys described below. Value is in millimeter represented
+ * as IOFixed.
+ */
+#define kIOHIDSurfaceDimensionsKey "SurfaceDimensions"
+
+/*!
+ * @define kIOHIDWidthKey
+ *
+ * @abstract
+ * Number property used in the surface dimensions dictionary described above.
+ * Default value represents the physical max - physical min of the absolute
+ * X value.
+ */
+#define kIOHIDWidthKey "Width"
+
+/*!
+ * @define kIOHIDHeightKey
+ *
+ * @abstract
+ * Number property used in the surface dimensions dictionary described above.
+ * Default value represents the physical max - physical min of the absolute
+ * Y value.
+ */
+#define kIOHIDHeightKey "Height"
+
+/*!
+ * @define kIOHIDEventDriverHandlesReport
+ *
+ * @abstract
+ * Boolean property used to let handleReport in an IOUserHIDEventDriver get the
+ * report before any other processing is done in IOUserHIDEventService.
+ * If this property is enabled the IOUserHIDEventService subclass should update
+ * the elements with IOHIDInterface::processReport to update the IOHIDElements as
+ * IOUserHIDEventService will not do this like when this property is not set.
+ */
+#define kIOHIDEventDriverHandlesReport "IOHIDEventDriverHandlesReport"
+
 #endif /* IOHIDDeviceTypes_h */

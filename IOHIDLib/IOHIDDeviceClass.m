@@ -38,6 +38,13 @@
 #import "IOHIDDescriptorParserPrivate.h"
 #import <IOKit/hidsystem/IOHIDLib.h>
 #import "IOHIDFamilyProbe.h"
+#if __has_include(<Rosetta/Rosetta.h>)
+#  include <Rosetta/Rosetta.h>
+#endif
+
+IOHID_DYN_LINK_DYLIB(/usr/lib, Rosetta)
+IOHID_DYN_LINK_FUNCTION(Rosetta, rosetta_is_current_process_translated, dyn_rosetta_is_current_process_translated, bool, false, (void), ())
+IOHID_DYN_LINK_FUNCTION(Rosetta, rosetta_convert_to_rosetta_absolute_time, dyn_rosetta_convert_to_rosetta_absolute_time, uint64_t, system_time, (uint64_t system_time), (system_time))
 
 #ifndef min
 #define min(a, b) ((a < b) ? a : b)
@@ -80,7 +87,7 @@
         result = [transaction queryInterface:uuidBytes
                                 outInterface:outInterface];
     }
-    
+
     if (uuid) {
         CFRelease(uuid);
     }
@@ -206,13 +213,6 @@
                 _IOHIDElementSetDeviceInterface(element.elementRef,
                                                 (IOHIDDeviceDeviceInterface **)&_device);
                 [_elements addObject:element];
-                
-                // Set the correct location for the value
-                if (elementStruct->duplicateValueSize) {
-                    elementStruct->valueLocation -= elementStruct->duplicateValueSize;
-                } else {
-                    elementStruct->valueLocation -= elementStruct->valueSize;
-                }
             }
         }
     }
@@ -341,7 +341,6 @@ exit:
         return kIOReturnSuccess;
     }
     
-#if TARGET_OS_OSX
     uint64_t regID;
     
     IORegistryEntryGetRegistryEntryID(_service, &regID);
@@ -366,7 +365,6 @@ exit:
         HIDLogError("0x%llx: TCC deny IOHIDDeviceOpen", regID);
     }
     require_action(_tccGranted, exit, ret = kIOReturnNotPermitted);
-#endif
     
     ret = IOServiceOpen(_service,
                         mach_task_self(),
@@ -379,81 +377,6 @@ exit:
     
 exit:
     return ret;
-}
-
-- (void)unmapMemory
-{
-#if !__LP64__
-    vm_address_t        mappedMem = (vm_address_t)_sharedMemory;
-#else
-    mach_vm_address_t   mappedMem = _sharedMemory;
-#endif
-    
-    if (_sharedMemory) {
-        IOConnectUnmapMemory(_connect,
-                             kIOHIDLibUserClientElementValuesType,
-                             mach_task_self(),
-                             mappedMem);
-        
-        _sharedMemory = 0;
-        _sharedMemorySize = 0;
-    }
-}
-
-- (IOReturn)mapMemory
-{
-    IOReturn ret = kIOReturnError;
-    
-#if !__LP64__
-    vm_address_t        mappedMem = (vm_address_t)0;
-    vm_size_t           memSize = 0;
-#else
-    mach_vm_address_t   mappedMem = (mach_vm_address_t)0;
-    mach_vm_size_t      memSize = 0;
-#endif
-    
-    [self unmapMemory];
-    
-    ret = IOConnectMapMemory(_connect,
-                             kIOHIDLibUserClientElementValuesType,
-                             mach_task_self(),
-                             &mappedMem,
-                             &memSize,
-                             kIOMapAnywhere);
-    require_noerr_action(ret, exit, {
-        HIDLogError("IOConnectCallMethod(kIOHIDLibUserClientElementValuesType):%x", ret);
-    });
-    
-    _sharedMemory = (mach_vm_address_t)mappedMem;
-    _sharedMemorySize = (mach_vm_size_t)memSize;
-    
-exit:
-    return ret;
-}
-
-- (BOOL)validCheck
-{
-    BOOL valid = false;
-    IOReturn ret = kIOReturnError;
-    uint64_t output[2];
-    uint32_t outputCount = 2;
-    
-    /*
-     * The valid check insures that the device is still open, and that the
-     * client has proper privileges in the case of secure input/console user.
-     */
-    ret = IOConnectCallScalarMethod(_connect,
-                                    kIOHIDLibUserClientDeviceIsValid,
-                                    0,
-                                    0,
-                                    output,
-                                    &outputCount);
-    require_noerr_action (ret, exit,  HIDLogError("IOConnectCallMethod(kIOHIDLibUserClientDeviceIsValid):%x", ret));
-    
-    valid = output[0];
-    
-exit:
-    return valid;
 }
 
 - (IOReturn)start:(NSDictionary * __unused)properties
@@ -496,10 +419,7 @@ static IOReturn _open(void *iunknown, IOOptionBits options)
     require_noerr_action(ret, exit, HIDLogError("IOConnectCallMethod(kIOHIDLibUserClientOpen):%x", ret));
     
     _opened = (ret == kIOReturnSuccess);
-    
-    ret = [self mapMemory];
-    require_noerr(ret, exit);
-    
+        
     if (_inputReportCallback || _inputReportTimestampCallback) {
         [_queue start];
     }
@@ -528,9 +448,7 @@ static IOReturn _close(void * iunknown, IOOptionBits options)
     if (_inputReportCallback || _inputReportTimestampCallback) {
         [_queue stop];
     }
-    
-    [self unmapMemory];
-    
+
     ret = IOConnectCallScalarMethod(_connect,
                                     kIOHIDLibUserClientClose,
                                     0,
@@ -559,9 +477,8 @@ static IOReturn _getProperty(void *iunknown,
     if (!pProperty) {
         return kIOReturnBadArgument;
     }
-    
+
     CFTypeRef prop = (__bridge CFTypeRef)_properties[key];
-    
     if (!prop) {
         if ([key isEqualToString:@(kIOHIDUniqueIDKey)]) {
             uint64_t regID;
@@ -579,13 +496,15 @@ static IOReturn _getProperty(void *iunknown,
         }
         
         if (prop) {
-            _properties[key] = (__bridge id)prop;
+            // Force a copy of the string to avoid the key reference from getting courrpted
+            NSString * dictKey = [key mutableCopy];
+            _properties[dictKey] = (__bridge id)prop;
             CFRelease(prop);
         }
     }
     
     *pProperty = prop;
-    
+
     return kIOReturnSuccess;
 }
 
@@ -602,6 +521,10 @@ static IOReturn _setProperty(void *iunknown,
 
 - (IOReturn)setProperty:(NSString *)key property:(id)property
 {
+    // Force a copy of the key and property to avoid the client from courrpting the storage.
+    // CFPropertyList is used to do a deep copy. Only types that are supported by Property Lists are valid then.
+    NSString* keyCopy = [key mutableCopy];
+    id propertyCopy = property ? (__bridge_transfer id)CFPropertyListCreateDeepCopy(kCFAllocatorDefault, (__bridge CFTypeRef)property, kCFPropertyListMutableContainersAndLeaves) : nil;
     if ([key isEqualToString:@(kIOHIDDeviceSuspendKey)]) {
         require(_queue, exit);
         
@@ -613,7 +536,8 @@ static IOReturn _setProperty(void *iunknown,
     }
     
 exit:
-    _properties[key] = property;
+    _properties[keyCopy] = propertyCopy;
+
     return kIOReturnSuccess;
 }
 
@@ -840,18 +764,16 @@ static IOReturn _setValue(void *iunknown,
     IOReturn ret = kIOReturnError;
     HIDLibElement *element = nil;
     HIDLibElement *tmp = nil;
-    IOHIDElementValue *elementValue = NULL;
-    uint32_t input = 0;
-    size_t inputSize = 0;
+    IOHIDElementValueHeader *inputStruct = NULL;
+    uint32_t inputSize = 0;
+    uint64_t input = 0;
     NSUInteger elementIndex;
     
     require_action(_opened, exit, ret = kIOReturnNotOpen);
     
     ret = [self initElements];
     require_noerr(ret, exit);
-    
-    require_action([self validCheck], exit, ret = kIOReturnNotPermitted);
-    
+
     tmp = [[HIDLibElement alloc] initWithElementRef:elementRef];
     require_action(tmp, exit, ret = kIOReturnError);
     
@@ -863,31 +785,38 @@ static IOReturn _setValue(void *iunknown,
                    element.type == kIOHIDElementTypeFeature,
                    exit,
                    ret = kIOReturnBadArgument);
-    
-    // Make sure the location of the element value is within our shared memory
-    require_action(element.valueLocation < _sharedMemorySize,
-                   exit,
-                   ret = kIOReturnError);
-    
-    // Copy the value to our shared kernel memory
-    elementValue = (IOHIDElementValue *)(_sharedMemory + element.valueLocation);
-    _IOHIDValueCopyToElementValuePtr(value, elementValue);
-    
+
+    require_action(value, exit, ret = kIOReturnBadArgument);
+
+    // Allows checking element is valid without informing kernel. Used by HIDTransactionClass.
     require_action(!(options & kHIDSetElementValuePendEvent),
                    exit,
                    ret = kIOReturnSuccess);
+
+    // Send the value to the kernel.
+    inputSize = (uint32_t)(sizeof(IOHIDElementValueHeader) + IOHIDValueGetLength(value));
+    inputStruct = malloc(inputSize);
+    _IOHIDValueCopyToElementValueHeader(value, inputStruct);
+
+    input = 1;
     
-    inputSize = sizeof(uint32_t);
-    input = (uint32_t)element.elementCookie;
-    
-    ret = IOConnectCallStructMethod(_connect,
-                                    kIOHIDLibUserClientPostElementValues,
-                                    &input,
-                                    inputSize,
-                                    0,
-                                    NULL);
+    ret = IOConnectCallMethod(_connect,
+                              kIOHIDLibUserClientPostElementValues,
+                              NULL,
+                              0,
+                              inputStruct,
+                              inputSize,
+                              0,
+                              NULL,
+                              NULL,
+                              NULL);
+    free(inputStruct);
     if (ret) {
-        HIDLogError("kIOHIDLibUserClientPostElementValues:%x",ret);
+        uint64_t regID;
+        IORegistryEntryGetRegistryEntryID(_service, &regID);
+        HIDLogError("kIOHIDLibUserClientPostElementValues(%llx):%x", regID, ret);
+    } else {
+        [element setValueRef:value];
     }
 exit:
     return ret;
@@ -926,6 +855,9 @@ static IOReturn _getValue(void *iunknown,
     uint64_t timestamp;
     uint32_t input = 0;
     size_t inputSize = 0;
+    size_t outputSize = 0;
+    size_t elementSize = 0;
+    uint64_t updateOptions = 0;
     NSUInteger elementIndex;
     
     if (!pValue) {
@@ -936,9 +868,7 @@ static IOReturn _getValue(void *iunknown,
     
     ret = [self initElements];
     require_noerr(ret, exit);
-    
-    require_action([self validCheck], exit, ret = kIOReturnNotPermitted);
-    
+
     tmp = [[HIDLibElement alloc] initWithElementRef:elementRef];
     require_action(tmp, exit, ret = kIOReturnError);
     
@@ -951,56 +881,51 @@ static IOReturn _getValue(void *iunknown,
     require_action(element.type != kIOHIDElementTypeCollection,
                    exit,
                    ret = kIOReturnBadArgument);
-    require_action(element.valueLocation < _sharedMemorySize,
-                   exit,
-                   ret = kIOReturnError);
-    
-    // Copy the value to our shared kernel memory
-    elementValue = (IOHIDElementValue *)(_sharedMemory + element.valueLocation);
-    timestamp = *((uint64_t *)&(elementValue->timestamp));
-    
-    // Check if we need to update our value
-    if (!element.valueRef ||
-        element.timestamp < timestamp ||
-        element.type == kIOHIDElementTypeFeature) {
-        IOHIDValueRef valueRef;
-        
-        valueRef = _IOHIDValueCreateWithElementValuePtr(kCFAllocatorDefault,
-                                                        element.elementRef,
-                                                        elementValue);
-        
-        if (valueRef) {
-            element.valueRef = valueRef;
-            CFRelease(valueRef);
-        }
+
+    if (element.valueRef) {
+        *pValue = element.valueRef;
     }
-    
-    *pValue = element.valueRef;
-    
-    // Do not call to the kernel if options prevent poll
-    require_action(!(options & kHIDGetElementValuePreventPoll),
+
+    // Allows checking element is valid without informing kernel. Used by HIDTransactionClass.
+    require_action(!(options & kHIDGetElementValuePendEvent),
                    exit,
                    ret = kIOReturnSuccess);
-    
-    // Only call to kernel if specified in options or this is a feature element
-    require_action(options & kHIDGetElementValueForcePoll ||
-                   element.type == kIOHIDElementTypeFeature,
-                   exit,
-                   ret = kIOReturnSuccess);
-    
-    inputSize = sizeof(uint32_t);
+
+    // Do not poll to the device if options prevent poll, or we are not getting a feature report
+    if (options & kHIDGetElementValuePreventPoll ||
+        element.type != kIOHIDElementTypeFeature) {
+        updateOptions |= kIOHIDElementPreventPoll;
+    }
+
+    // Call to device if Forcing Poll
+    if (options & kHIDGetElementValueForcePoll && updateOptions & kIOHIDElementPreventPoll) {
+        updateOptions ^= kIOHIDElementPreventPoll;
+    }
+
     input =  (uint32_t)element.elementCookie;
-    
-    ret = IOConnectCallStructMethod(_connect,
-                                    kIOHIDLibUserClientUpdateElementValues,
-                                    &input,
-                                    inputSize,
-                                    0,
-                                    NULL);
+    inputSize = sizeof(uint32_t);
+    elementSize = sizeof(IOHIDElementValue) + _IOHIDElementGetLength(element.elementRef);
+    outputSize = elementSize;
+    elementValue = (IOHIDElementValue*)malloc(elementSize);
+
+    ret = IOConnectCallMethod(_connect,
+                              kIOHIDLibUserClientUpdateElementValues,
+                              &updateOptions,
+                              1,
+                              &input,
+                              sizeof(input),
+                              0,
+                              NULL,
+                              elementValue,
+                              &outputSize);
     require_noerr(ret, exit);
     
     // Update our value after kernel call
     timestamp = *((uint64_t *)&(elementValue->timestamp));
+
+    // Convert to the same time base as element.timestamp
+    timestamp = dyn_rosetta_is_current_process_translated() ?
+        dyn_rosetta_convert_to_rosetta_absolute_time(timestamp) : timestamp;
     
     // Check if we need to update our value
     if (!element.valueRef ||
@@ -1011,7 +936,7 @@ static IOReturn _getValue(void *iunknown,
         valueRef = _IOHIDValueCreateWithElementValuePtr(kCFAllocatorDefault,
                                                         element.elementRef,
                                                         elementValue);
-        
+
         if (valueRef) {
             element.valueRef = valueRef;
             CFRelease(valueRef);
@@ -1021,6 +946,9 @@ static IOReturn _getValue(void *iunknown,
     *pValue = element.valueRef;
     
 exit:
+    if (elementValue) {
+        free(elementValue);
+    }
     return ret;
 }
 
@@ -1080,9 +1008,10 @@ static void _valueAvailableCallback(void *context,
                                             size,
                                             timestamp);
         }
-        
+
         CFRelease(value);
     }
+    
 }
 
 static IOReturn _setInputReportCallback(void *iunknown,
@@ -1189,8 +1118,7 @@ static IOReturn _setReport(void *iunknown,
     input[1] = reportID;
     
     require_action(_opened, exit, ret = kIOReturnNotOpen);
-    require_action([self validCheck], exit, ret = kIOReturnNotPermitted);
-    
+
     if (callback) {
         io_async_ref64_t asyncRef;
         AsyncReportContext *asyncContext;
@@ -1287,7 +1215,6 @@ static IOReturn _getReport(void *iunknown,
     }
     
     require_action(_opened, exit, ret = kIOReturnNotOpen);
-    require_action([self validCheck], exit, ret = kIOReturnNotPermitted);
     
     input[0] = reportType;
     input[1] = reportID;
@@ -1386,6 +1313,16 @@ static IOReturn _setInputReportWithTimeStampCallback(void *iunknown,
     return kIOReturnSuccess;
 }
 
+- (void)releaseOOBReport:(uint64_t)reportAddress
+{
+    // Release report from kernel mapping.
+    uint64_t inputs[] = {reportAddress};
+    IOConnectCallScalarMethod(_connect,
+                              kIOHIDLibUserClientReleaseReport,
+                              inputs, 1,
+                              NULL, NULL);
+}
+
 - (instancetype)init
 {
     self = [super init];
@@ -1426,9 +1363,7 @@ static IOReturn _setInputReportWithTimeStampCallback(void *iunknown,
 - (void)dealloc
 {
     free(_device);
-    
-    [self unmapMemory];
-    
+
     if (_runLoopSource) {
         CFRelease(_runLoopSource);
     }

@@ -6,10 +6,12 @@
 //
 //
 
+#include <AssertMacros.h>
 #include "IOHIDPointerScrollFilter.h"
 
 
 #include <new>
+#include <TargetConditionals.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreFoundation/CFLogUtilities.h>
 #include <IOKit/hid/IOHIDServiceFilterPlugIn.h>
@@ -126,7 +128,9 @@ IOHIDPointerScrollFilter::IOHIDPointerScrollFilter(CFUUIDRef factoryID):
   _service(NULL),
   _pointerAcceleration(-1),
   _scrollAcceleration(-1),
-  _leagacyShim(false)
+  _leagacyShim(false),
+  _pointerAccelerationSupported(true),
+  _scrollAccelerationSupported(true)
 {
   for (size_t index = 0; index < sizeof(_scrollAccelerators)/sizeof(_scrollAccelerators[0]); index++) {
     _scrollAccelerators[index] = NULL;
@@ -335,7 +339,10 @@ CFStringRef IOHIDPointerScrollFilter::_cachedPropertyList[] = {
     CFSTR(kIOHIDScrollAccelerationTypeKey),
     CFSTR(kIOHIDPointerAccelerationTypeKey),
     CFSTR(kIOHIDUserPointerAccelCurvesKey),
-    CFSTR(kIOHIDUserScrollAccelCurvesKey)
+    CFSTR(kIOHIDUserScrollAccelCurvesKey),
+    CFSTR(kIOHIDPointerAccelerationMultiplierKey),
+    CFSTR(kIOHIDPointerAccelerationSupportKey),
+    CFSTR(kIOHIDScrollAccelerationSupportKey)
 };
 
 //------------------------------------------------------------------------------
@@ -356,9 +363,13 @@ void IOHIDPointerScrollFilter::setPropertyForClient(CFStringRef key,CFTypeRef pr
   for (size_t index = 0 ; index < sizeof(_cachedPropertyList) / sizeof(_cachedPropertyList[0]); index++) {
       if (CFEqual(key,  _cachedPropertyList[index])) {
           _cachedProperty.SetValueForKey(key, property);
+          _property.SetValueForKey(key, property);
           updated = true;
           break;
       }
+  }
+  if (updated) {
+      HIDLog("[%@] Acceleration key:%@ value:%@ apply:%s client:%@", SERVICE_ID, key, property, _queue ? "yes" : "no", client);
   }
   if (updated && _queue) {
       setupAcceleration ();
@@ -379,7 +390,8 @@ SInt32 IOHIDPointerScrollFilter::match(IOHIDServiceRef service, IOOptionBits opt
 {
     _matchScore = (IOHIDServiceConformsTo(service, kHIDPage_GenericDesktop, kHIDUsage_GD_Mouse) ||
                    IOHIDServiceConformsTo(service, kHIDPage_GenericDesktop, kHIDUsage_GD_Pointer) ||
-                   IOHIDServiceConformsTo(service, kHIDPage_AppleVendor,    kHIDUsage_GD_Pointer)) ? 100 : 0;
+                   IOHIDServiceConformsTo(service, kHIDPage_AppleVendor,    kHIDUsage_GD_Pointer) ||
+                   IOHIDServiceConformsTo(service, kHIDPage_Digitizer,    kHIDUsage_Dig_TouchPad)) ? 100 : 0;
     
     HIDLogDebug("(%p) for ServiceID %@ with score %d", this, IOHIDServiceGetRegistryID(service), (int)_matchScore);
     
@@ -427,6 +439,7 @@ void IOHIDPointerScrollFilter::accelerateEvent(IOHIDEventRef event) {
   IOHIDEventRef accelEvent;
 
   if (_pointerAccelerator &&
+      _pointerAccelerationSupported &&
       IOHIDEventGetType(event) == kIOHIDEventTypePointer &&
       !(IOHIDEventGetEventFlags(event) & kIOHIDPointerEventOptionsNoAcceleration)) {
     double xy[2];
@@ -451,7 +464,8 @@ void IOHIDPointerScrollFilter::accelerateEvent(IOHIDEventRef event) {
       }
     }
   }
-  if (IOHIDEventGetType(event) == kIOHIDEventTypeScroll &&
+  if (_scrollAccelerationSupported &&
+      IOHIDEventGetType(event) == kIOHIDEventTypeScroll &&
       !(IOHIDEventGetEventFlags(event) & kIOHIDScrollEventOptionsNoAcceleration)) {
     if ((IOHIDEventGetEventFlags(event) & kIOHIDAccelerated) == 0) {
       static int axis [3] = {kIOHIDEventFieldScrollX, kIOHIDEventFieldScrollY, kIOHIDEventFieldScrollZ};
@@ -478,13 +492,13 @@ void IOHIDPointerScrollFilter::accelerateEvent(IOHIDEventRef event) {
       }
     }
   }
-  //accelerateChildrens(event);
+  accelerateChildrens(event);
 }
 
 //------------------------------------------------------------------------------
 // IOHIDPointerScrollFilter::setupPointerAcceleration
 //------------------------------------------------------------------------------
-void IOHIDPointerScrollFilter::setupPointerAcceleration()
+void IOHIDPointerScrollFilter::setupPointerAcceleration(double pointerAccelerationMultiplier)
 {
   
   if (_leagacyShim) {
@@ -499,6 +513,14 @@ void IOHIDPointerScrollFilter::setupPointerAcceleration()
 
   if (tmp) {
     delete tmp;
+  }
+
+
+  CFBooleanRefWrap enabled = CFBooleanRefWrap((CFBooleanRef)copyCachedProperty(CFSTR(kIOHIDPointerAccelerationSupportKey)), true);
+  if (enabled.Reference() == NULL || (bool)enabled) {
+    _pointerAccelerationSupported = true;
+  } else {
+    _pointerAccelerationSupported = false;
   }
   
   CFNumberRefWrap resolution = CFNumberRefWrap((CFNumberRef)IOHIDServiceCopyProperty (_service, CFSTR(kIOHIDPointerResolutionKey)), true);
@@ -519,27 +541,42 @@ void IOHIDPointerScrollFilter::setupPointerAcceleration()
             return;
         }
     }
-  CFNumberRefWrap pointerAcceleration;
-  
-  CFRefWrap<CFStringRef>  accelerationType ((CFStringRef)copyCachedProperty (CFSTR(kIOHIDPointerAccelerationTypeKey)), true);
+    
+    CFRefWrap<CFTypeRef>  pointerAccelType(NULL);
+    CFRefWrap<CFTypeRef>  typePointerAccel(NULL);
+    CFRefWrap<CFTypeRef>  mousePointerAccel(NULL);
+    CFRefWrap<CFTypeRef>  basicPointerAccel(NULL);
 
-  if (accelerationType.Reference()) {
-    pointerAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(accelerationType), true);
-  }
-  if (pointerAcceleration.Reference() == NULL) {
-    pointerAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(CFSTR(kIOHIDMouseAccelerationType)), true);
-  }
-  if (pointerAcceleration.Reference() == NULL) {
-    pointerAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(CFSTR(kIOHIDPointerAccelerationKey)), true);
-  }
-  if (pointerAcceleration.Reference()) {
-    _pointerAcceleration = FIXED_TO_DOUBLE((SInt32)pointerAcceleration);
-  }
-  if (_pointerAcceleration < 0) {
-    HIDLogInfo("[%@] Could not find kIOHIDMouseAccelerationType or acceleration disabled", SERVICE_ID);
-    return;
-  }
- 
+    CFNumberRefWrap pointerAcceleration;
+  
+    pointerAccelType = CFRefWrap<CFTypeRef>(copyCachedProperty (CFSTR(kIOHIDPointerAccelerationTypeKey)), true);
+
+    if (pointerAccelType.Reference()) {
+        typePointerAccel =  CFRefWrap<CFTypeRef> (copyCachedProperty((CFStringRef)pointerAccelType.Reference()), true);
+        pointerAcceleration = CFNumberRefWrap((CFNumberRef)typePointerAccel.Reference());
+    }
+    if (pointerAcceleration.Reference() == NULL) {
+        mousePointerAccel = CFRefWrap<CFTypeRef> (copyCachedProperty(CFSTR(kIOHIDMouseAccelerationType)), true);
+        pointerAcceleration = CFNumberRefWrap((CFNumberRef)mousePointerAccel.Reference());
+    }
+    if (pointerAcceleration.Reference() == NULL) {
+        basicPointerAccel =  CFRefWrap<CFTypeRef> (copyCachedProperty(CFSTR(kIOHIDPointerAccelerationKey)), true);
+        pointerAcceleration = CFNumberRefWrap((CFNumberRef)basicPointerAccel.Reference());
+    }
+    if (pointerAcceleration.Reference()) {
+        _pointerAcceleration = FIXED_TO_DOUBLE((SInt32)pointerAcceleration);
+    }
+    HIDLog ("[%@] Pointer acceleration (%s) %@:%@ %s:%@ %s:%@ %@",
+            SERVICE_ID, _pointerAcceleration < 0 ? "disabled" : "enabled",
+            pointerAccelType.Reference(), typePointerAccel.Reference(),
+            kIOHIDMouseAccelerationType, mousePointerAccel.Reference(),
+            kIOHIDPointerAccelerationKey, basicPointerAccel.Reference(),
+            pointerAcceleration.Reference());
+
+    if (_pointerAcceleration < 0) {
+        return;
+    }
+
   HIDLogDebug("[%@] Pointer acceleration value %f", SERVICE_ID, _pointerAcceleration);
 
   IOHIDAccelerationAlgorithm * algorithm = NULL;
@@ -580,7 +617,7 @@ void IOHIDPointerScrollFilter::setupPointerAcceleration()
     }
   }
   if (algorithm) {
-    _pointerAccelerator = new IOHIDPointerAccelerator (algorithm, FIXED_TO_DOUBLE((SInt32)resolution), (SInt32)defaultRate);
+    _pointerAccelerator = new IOHIDPointerAccelerator (algorithm, FIXED_TO_DOUBLE((SInt32)resolution), (SInt32)defaultRate, pointerAccelerationMultiplier);
   } else {
     HIDLogInfo("[%@] Could not create accelerator", SERVICE_ID);
   }
@@ -589,7 +626,7 @@ void IOHIDPointerScrollFilter::setupPointerAcceleration()
 //------------------------------------------------------------------------------
 // IOHIDPointerScrollFilter::setupScrollAcceleration
 //------------------------------------------------------------------------------
-void IOHIDPointerScrollFilter::setupScrollAcceleration() {
+void IOHIDPointerScrollFilter::setupScrollAcceleration(double scrollAccelerationMultiplier) {
 
   static CFStringRef ResolutionKeys[] = {
     CFSTR(kIOHIDScrollResolutionXKey),
@@ -610,28 +647,50 @@ void IOHIDPointerScrollFilter::setupScrollAcceleration() {
     }
     return;
   }
-  
-  CFNumberRefWrap scrollAcceleration;
-  
-  CFRefWrap<CFStringRef>  accelerationType ((CFStringRef)copyCachedProperty (CFSTR(kIOHIDScrollAccelerationTypeKey)), true);
-  
-  if (accelerationType.Reference()) {
-    scrollAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(accelerationType), true);
-  }
-  if (scrollAcceleration.Reference() == NULL) {
-    scrollAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(CFSTR(kIOHIDMouseScrollAccelerationKey)), true);
-  }
-  if (scrollAcceleration.Reference() == NULL) {
-    scrollAcceleration = CFNumberRefWrap((CFNumberRef)copyCachedProperty(CFSTR(kIOHIDScrollAccelerationKey)), true);
-  }
-  if (scrollAcceleration.Reference()) {
-    _scrollAcceleration = FIXED_TO_DOUBLE((SInt32)scrollAcceleration);
+
+  CFBooleanRefWrap enabled = CFBooleanRefWrap((CFBooleanRef)copyCachedProperty(CFSTR(kIOHIDScrollAccelerationSupportKey)), true);
+  if (enabled.Reference() == NULL || (bool)enabled) {
+    _scrollAccelerationSupported = true;
+  } else {
+    _scrollAccelerationSupported = false;
   }
   
-  if (_scrollAcceleration < 0) {
-    HIDLogInfo("[%@] Could not find kIOHIDMouseScrollAccelerationKey or acceleration disabled", SERVICE_ID);
-    return;
-  }
+    CFNumberRefWrap       scrollAcceleration;
+
+    CFRefWrap<CFTypeRef>  scrollAccelType(NULL);
+    CFRefWrap<CFTypeRef>  typeScrollAccel(NULL);
+    CFRefWrap<CFTypeRef>  mouseScrollAccel(NULL);
+    CFRefWrap<CFTypeRef>  basicScrollAccel(NULL);
+
+    scrollAccelType = CFRefWrap<CFTypeRef>(copyCachedProperty (CFSTR(kIOHIDScrollAccelerationTypeKey)), true);
+  
+    if (scrollAccelType.Reference()) {
+        typeScrollAccel = CFRefWrap<CFTypeRef>(copyCachedProperty((CFStringRef)scrollAccelType.Reference()), true);
+        scrollAcceleration = CFNumberRefWrap((CFNumberRef)typeScrollAccel.Reference());
+    }
+    if (scrollAcceleration.Reference() == NULL) {
+        mouseScrollAccel = CFRefWrap<CFTypeRef>(copyCachedProperty(CFSTR(kIOHIDMouseScrollAccelerationKey)), true);
+        scrollAcceleration = CFNumberRefWrap((CFNumberRef)mouseScrollAccel.Reference());
+    }
+    if (scrollAcceleration.Reference() == NULL) {
+        basicScrollAccel = CFRefWrap<CFTypeRef>(copyCachedProperty(CFSTR(kIOHIDScrollAccelerationKey)), true);
+        scrollAcceleration = CFNumberRefWrap((CFNumberRef)basicScrollAccel.Reference());
+    }
+    if (scrollAcceleration.Reference()) {
+        _scrollAcceleration = FIXED_TO_DOUBLE((SInt32)scrollAcceleration);
+    }
+
+    HIDLog("[%@] Scroll acceleration (%s) %@:%@ %s:%@ %s:%@ %@",
+            SERVICE_ID, _scrollAcceleration < 0 ? "disabled" : "enabled",
+            scrollAccelType.Reference(), typeScrollAccel.Reference(),
+            kIOHIDMouseScrollAccelerationKey, mouseScrollAccel.Reference(),
+            kIOHIDScrollAccelerationKey, basicScrollAccel.Reference(),
+            scrollAcceleration.Reference()
+            );
+
+    if (_scrollAcceleration < 0) {
+        return;
+    }
   
   HIDLogDebug("[%@] Scroll acceleration value %f", SERVICE_ID, _scrollAcceleration);
   
@@ -663,7 +722,7 @@ void IOHIDPointerScrollFilter::setupScrollAcceleration() {
       HIDLogInfo("[%@] Could not get kIOHIDScrollResolutionKey", SERVICE_ID);
       continue;
     }
-    
+
     CFArrayRefWrap userCurves ((CFArrayRef)IOHIDServiceCopyProperty (_service, CFSTR(kIOHIDUserScrollAccelCurvesKey)), true);
     if (userCurves &&  userCurves.Count() > 0) {
         algorithm = IOHIDParametricAcceleration::CreateWithParameters(
@@ -704,7 +763,7 @@ void IOHIDPointerScrollFilter::setupScrollAcceleration() {
       }
     }
     if (algorithm) {
-      _scrollAccelerators[index] = new IOHIDScrollAccelerator(algorithm, FIXED_TO_DOUBLE((SInt32)resolution), FIXED_TO_DOUBLE((SInt32)rate));
+      _scrollAccelerators[index] = new IOHIDScrollAccelerator(algorithm, FIXED_TO_DOUBLE((SInt32)resolution), FIXED_TO_DOUBLE((SInt32)rate), scrollAccelerationMultiplier);
     }
   }
 }
@@ -718,21 +777,43 @@ void IOHIDPointerScrollFilter::setupAcceleration()
     HIDLogDebug("(%p) setupAcceleration service not available", this);
     return;
   }
-  
-  setupPointerAcceleration();
-  setupScrollAcceleration ();
+
+  CFNumberRefWrap pointerAccelerationMultiplier = CFNumberRefWrap((CFNumberRef)copyCachedProperty(CFSTR(kIOHIDPointerAccelerationMultiplierKey)), true);
+  if (pointerAccelerationMultiplier.Reference() == NULL || (SInt32)pointerAccelerationMultiplier == 0) {
+     pointerAccelerationMultiplier = CFNumberRefWrap((SInt32) DOUBLE_TO_FIXED((double)(1.0)));
+     if (pointerAccelerationMultiplier.Reference() == NULL) {
+       HIDLogInfo("[%@] Could not get/create pointer acceleration multiplier", SERVICE_ID);
+       return;
+     }
+  }
+  setupPointerAcceleration(FIXED_TO_DOUBLE((SInt32)pointerAccelerationMultiplier));
+
+  // @reado scroll acceleration logic without timestamp
+  // for now no need for fixed multiplier since timestamp
+  // is average over multiple packets , so it's not same problem
+  // as pointer accleration where rate multiplier considers
+  // delta between two packets
+  setupScrollAcceleration (1.0);
 }
 
 //------------------------------------------------------------------------------
 // IOHIDPointerScrollFilter::getCachedProperty
 //------------------------------------------------------------------------------
 CFTypeRef IOHIDPointerScrollFilter::copyCachedProperty (CFStringRef key)  const {
-  CFTypeRef value = _cachedProperty [key];
-  if (value) {
-    CFRetain(value);
+    CFTypeRef value = _cachedProperty [key];
+    if (value) {
+        CFRetain(value);
+        return value;
+    }
+    value = IOHIDServiceCopyProperty (_service, key);
+    if (value) {
+        return value;
+    }
+    value = _property[key];
+    if (value) {
+        CFRetain(value);
+    }
     return value;
-  }
-  return IOHIDServiceCopyProperty (_service, key);
 }
 
 //------------------------------------------------------------------------------
@@ -759,7 +840,8 @@ void IOHIDPointerScrollFilter::serialize (CFMutableDictionaryRef dict) const {
   serializer.SetValueForKey(CFSTR("PointerAccelerationValue"), DOUBLE_TO_FIXED(_pointerAcceleration));
   serializer.SetValueForKey(CFSTR("ScrollAccelerationValue") , DOUBLE_TO_FIXED(_scrollAcceleration));
   serializer.SetValueForKey(CFSTR("MatchScore"), (uint64_t)_matchScore);
-    
+  serializer.SetValueForKey(CFSTR("Property"), _property.Reference());
+   
   if (_pointerAccelerator) {
       CFMutableDictionaryRefWrap pa;
       _pointerAccelerator->serialize (pa);

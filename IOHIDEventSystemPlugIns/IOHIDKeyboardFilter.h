@@ -18,6 +18,7 @@
 
 #include <IOKit/hid/IOHIDServiceFilterPlugIn.h>
 #include <IOKit/hid/IOHIDUsageTables.h>
+#include <IOKit/pwr_mgt/IOPMLibPrivate.h>
 #include <map>
 #include <set>
 
@@ -152,7 +153,6 @@ private:
 
     uint32_t        _numLockOn;
 
-#if TARGET_OS_OSX
     IOHIDEventRef   _delayedEjectKeyEvent;
     UInt32          _ejectKeyDelayMS;
 
@@ -162,7 +162,15 @@ private:
     dispatch_source_t _ejectKeyDelayTimer;
 
     dispatch_source_t _mouseKeyActivationResetTimer;
-#endif
+    
+    IOPMConnection  _powerConnect;
+
+    dispatch_block_t _pmInitBlock;
+
+
+    IOHIDEventRef   _delayedLockKeyEvent;
+    UInt32          _lockKeyDelayMS;
+    dispatch_source_t _lockKeyDelayTimer;
 
     boolean_t       _capsLockState;
     boolean_t       _capsLockLEDState;
@@ -174,6 +182,7 @@ private:
     
     StickyKeyHandler *_stickyKeyHandler;
   
+    
     IOHIDEventRef processStickyKeys(IOHIDEventRef event);
     void setStickyKeyState(UInt32 usagePage, UInt32 usage, StickyKeyState state);
     StickyKeyState getStickyKeyState(UInt32 usagePage, UInt32 usage);
@@ -214,7 +223,6 @@ private:
     KeyMap createMapFromStringMap(CFStringRef mappings);
     IOHIDEventRef processKeyMappings(IOHIDEventRef event);
 
-#if TARGET_OS_OSX
     IOHIDEventRef   processEjectKeyDelay(IOHIDEventRef event);
     void dispatchEjectKey(void);
     void resetEjectKeyDelay(void);
@@ -222,8 +230,17 @@ private:
     static kern_return_t setHIDSystemParam(CFStringRef key, uint32_t property);
     uint32_t getKeyboardID ();
     uint32_t getKeyboardID (uint16_t productID, uint16_t vendorID);
+    //------------------------------------------------------------------------------
+    // IOHIDKeyboardFilter::powerNotificationCallback
+    //------------------------------------------------------------------------------
+    static void powerNotificationCallback (void * refcon, IOPMConnection connection, IOPMConnectionMessageToken token, IOPMCapabilityBits eventDescriptor);
+    void powerNotificationCallback (IOPMConnection connection, IOPMConnectionMessageToken token, IOPMCapabilityBits eventDescriptor);
+
+
     bool isModifiersPressed ();
-#endif
+    void dispatchLockKey(void);
+    void resetLockKeyDelay(void);
+    IOHIDEventRef processLockKeyDelay(IOHIDEventRef event);
     
     void setEjectKeyProperty(uint32_t keyboardID);
     bool isDelayedEvent(IOHIDEventRef event);

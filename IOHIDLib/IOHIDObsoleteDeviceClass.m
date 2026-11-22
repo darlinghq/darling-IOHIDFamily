@@ -344,27 +344,82 @@ static IOHIDOutputTransactionInterface **_allocOutputTransaction(void *iunknown)
     return transaction;
 }
 
+// What the completion of an asynchronous call of the obsolete interface has to
+// hand back to the function of the caller: the call has no context argument of
+// its own, so the three values travel in a block allocated per call.
+typedef struct {
+    IOHIDReportCallbackFunction callback;
+    void *target;
+    void *refcon;
+} ObsoleteReportCompletion;
+
+static void obsoleteReportCompletion(void *context,
+                                     IOReturn result,
+                                     void *sender,
+                                     IOHIDReportType type __unused,
+                                     uint32_t reportID __unused,
+                                     uint8_t *report __unused,
+                                     CFIndex reportLength)
+{
+    ObsoleteReportCompletion completion = *(ObsoleteReportCompletion *)context;
+
+    free(context);
+    (*completion.callback)(completion.target,
+                           result,
+                           completion.refcon,
+                           sender,
+                           (uint32_t)reportLength);
+}
+
+static ObsoleteReportCompletion *newObsoleteReportCompletion(IOHIDReportCallbackFunction callback,
+                                                             void *target,
+                                                             void *refcon)
+{
+    ObsoleteReportCompletion *completion = NULL;
+
+    if (callback) {
+        completion = malloc(sizeof(*completion));
+        if (completion) {
+            completion->callback = callback;
+            completion->target = target;
+            completion->refcon = refcon;
+        }
+    }
+    return completion;
+}
+
 static IOReturn _setReport(void *iunknown,
                            IOHIDReportType reportType,
                            uint32_t reportID,
                            void *reportBuffer,
                            uint32_t reportBufferSize,
                            uint32_t timeoutMS,
-                           IOHIDReportCallbackFunction callback __unused,
-                           void *callbackTarget __unused,
-                           void *callbackRefcon __unused)
+                           IOHIDReportCallbackFunction callback,
+                           void *callbackTarget,
+                           void *callbackRefcon)
 {
     IUnknownVTbl *vtbl = *((IUnknownVTbl**)iunknown);
     IOHIDObsoleteDeviceClass *me = (__bridge id)vtbl->_reserved;
-    
-    return [me setReport:reportType
-                reportID:reportID
-                  report:reportBuffer
-            reportLength:reportBufferSize
-                 timeout:timeoutMS
-                callback:nil
-                 context:nil
-                 options:0];
+    ObsoleteReportCompletion *completion = newObsoleteReportCompletion(callback, callbackTarget, callbackRefcon);
+
+    if (callback && !completion) {
+        return kIOReturnNoMemory;
+    }
+
+    IOReturn ret = [me setReport:reportType
+                        reportID:reportID
+                          report:reportBuffer
+                    reportLength:reportBufferSize
+                         timeout:timeoutMS
+                        callback:completion ? obsoleteReportCompletion : nil
+                         context:completion
+                         options:0];
+
+    if (ret != kIOReturnSuccess) {
+        // no completion follows a failed call
+        free(completion);
+    }
+    return ret;
 }
 
 static IOReturn _getReport(void *iunknown,
@@ -373,23 +428,33 @@ static IOReturn _getReport(void *iunknown,
                            void *reportBuffer,
                            uint32_t *reportBufferSize,
                            uint32_t timeoutMS,
-                           IOHIDReportCallbackFunction callback __unused,
-                           void *callbackTarget __unused,
-                           void *callbackRefcon __unused)
+                           IOHIDReportCallbackFunction callback,
+                           void *callbackTarget,
+                           void *callbackRefcon)
 {
     IUnknownVTbl *vtbl = *((IUnknownVTbl**)iunknown);
     IOHIDObsoleteDeviceClass *me = (__bridge id)vtbl->_reserved;
     IOReturn ret = kIOReturnError;
     CFIndex reportLength = reportBufferSize ? *reportBufferSize : 0;
+    ObsoleteReportCompletion *completion = newObsoleteReportCompletion(callback, callbackTarget, callbackRefcon);
+
+    if (callback && !completion) {
+        return kIOReturnNoMemory;
+    }
     
     ret = [me getReport:reportType
                reportID:reportID
                  report:reportBuffer
            reportLength:&reportLength
                 timeout:timeoutMS
-               callback:nil
-                context:nil
+               callback:completion ? obsoleteReportCompletion : nil
+                context:completion
                 options:0];
+
+    if (ret != kIOReturnSuccess) {
+        // no completion follows a failed call
+        free(completion);
+    }
     
     if (reportBufferSize) {
         *reportBufferSize = (uint32_t)reportLength;

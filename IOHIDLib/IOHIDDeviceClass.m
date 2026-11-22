@@ -281,7 +281,17 @@ static void _portCallback(CFMachPortRef port,
                           void *info)
 {
     IOHIDDeviceClass *me = (__bridge id)info;
-    
+    mach_msg_header_t *header = (mach_msg_header_t *)msg;
+
+    // The port also receives the completions of asynchronous calls
+    // (SetReport/GetReport with a callback): they are IOKit notification
+    // messages that IODispatchCalloutFromMessage hands to the callback in the
+    // async reference. Anything else is the notification of the data queue.
+    if (header->msgh_id == kOSNotificationMessageID) {
+        IODispatchCalloutFromMessage(NULL, header, NULL);
+        return;
+    }
+
     [me->_queue queueCallback:port msg:msg size:size info:info];
 }
 
